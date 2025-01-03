@@ -1,0 +1,115 @@
+---
+title: "Sebastes_microhaplotype_preprocessing"
+author: "Kevin Olsen"
+date: "2024-10-23"
+output: 
+  html_document:
+    code_folding: hide 
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+```
+
+**Following bash scripts were used for preprocessing of paired-end reads for microhaplotyping rockfish (Sebastes spp.) for species identification. Preprocessing was conducted on Oregon State University's high performance computing cluster with SGE scheduling system.**
+
+Broadly, steps include: 
+
+- Make subdirectories and upload reference files. 
+
+- Merge paired-end reads. 
+
+- Align merged reads to reference file.
+$$\\[0.15in]$$
+
+**Create directory for the project and 4 subdirectories to store files in.**
+```{bash}
+mkdir ./Sebastes_microhap 
+
+mkdir ./Sebastes_microhap/reference
+mkdir ./Sebastes_microhap/rawdata
+mkdir ./Sebastes_microhap/map
+mkdir ./Sebastes_microhap/flash
+```
+
+Upload the reference file (gtseq18_loci.fasta) into the reference directory.
+
+Copy the paired end FASTQ files into rawdata directory.
+
+$$\\[0.15in]$$
+**Use the SGE scheduling command (SGE_Batch) and the bwa index command to index the reference file.**
+
+The SGE_Batch commmand needs the name of the job (-r), the name of the queue to use (-q), and the command (-c) to execute.
+
+The bwa index has two algorithms (-a). This protocol uses the default algorithm (is).
+```{bash}
+SGE_Batch -r sebastes_index -q <QUEUE> -c "bwa index -a is <PATH>/Sebastes_microhap/reference/gtseq18_loci.fasta"
+```
+$$\\[0.15in]$$
+
+**Use [flash2](https://github.com/dstreett/FLASH2) to merge paired end reads.**
+
+Write a script called merge.sh to automate merging of forward and reverse reads for each sample. To write the script:
+```{bash}
+nano ./merge.sh
+```
+
+```{bash}
+#!/bin/bash
+
+forwardreads=(<PATH>/Sebastes_microhap/rawdata/*_R1_001.fastq.gz*)
+
+for forwardread in ${forwardreads[@]}
+do
+reverseread=$(echo $forwardread | sed 's\_R1_\_R2_\g')
+outputfilename=$(basename $forwardread _R1_fq.gz)
+
+flash2 -m 10 -M 100 -z -o $outputfilename -d <PATH>/Sebastes_microhap/flash/ $forwardread $reverseread
+
+done
+```
+
+Make the script executable.
+```{bash}
+chmod +x ./merge.sh 
+```
+
+Run the script with SGE_Batch.
+```{bash}
+SGE_Batch -r flash_merge -q <QUEUE> -c merge.sh
+```
+$$\\[0.15in]$$
+**Map flashed reads with bwa mem.**
+
+Write scipt called map.sh to automate mapping of flash merged files into sam alignment files.
+```{bash}
+nano ./map.sh
+```
+
+```{bash}
+#!/bin/bash
+
+ref= <PATH>/Sebastes_microhap/reference/gtseq18_loci.fasta
+
+flashed=(<PATH>/Sebastes_microhap/flash/*.extendedFrags.fastq.gz)
+
+for flash in ${flashed[@]}
+do
+outputfilename=$(basename $flash .extendedFrags.fastq.gz)
+readgroup="@RG\tID:${outputfilename}\tLB:amplicon\tPL:ILLUMINA\tSM:sebastes${outputfilename}"
+bwa mem -a -M -v 3 -R $readgroup $ref $flash > <PATH>/Sebastes_microhap/SAM/${outputfilename}.aln.sam
+
+done
+```
+
+Make the script executable.
+```{bash}
+chmod +x ./map.sh 
+```
+
+Run the script with SGE_Batch.
+```{bash}
+SGE_Batch -r bwa_map -q <QUEUE> -c map.sh
+```
+$$\\[0.15in]$$
+**Move the aligned sam files to local computer for microhaplotype calling with the R package [microhaplot](https://github.com/ngthomas/microhaplot).**

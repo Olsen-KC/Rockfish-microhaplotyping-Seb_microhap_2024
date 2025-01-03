@@ -1,0 +1,267 @@
+---
+title: "Sebastes_microhaplotype_calling_species_ID"
+author: "Kevin Olsen"
+date: "2024-12-17"
+output:
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+```
+
+**Objective: Generate microhaplotype genotpyes of rockfish (Sebastes spp.) samples for species identification.**
+
+Broadly, steps include: 
+
+- Install the R shiny application [microhaplot](https://github.com/ngthomas/microhaplot).
+
+- Call genotypes of aligned SAM files generated in [Sebastes_microhaplotype_preprocessing](https://github.com/Olsen-KC/Rockfish-microhaplotyping-Seb_microhap_2024/blob/main/Preprocessing/Sebastes_microhaplotype_preprocessing.html) with microhaplot.
+
+- Assign samples to species with the R package rubias.
+$$\\[0.15in]$$
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(magrittr) 
+library(kableExtra)
+library(microhaplot)
+library(rubias)
+```
+
+**Install the R package microhaplot with devtools.**
+
+Note, installation only required once.
+```{r}
+devtools::install_github("ngthomas/microhaplot", build_vignettes = TRUE, build_opts = c("--no-resave-data", "--no-manual"))
+```
+
+After installing microhaplot, move it to a convenient working directory. Note, the working directory can not be within a OneDrive directory. If it is, microhaplot will fail to run.
+```{r}
+microhaplot::mvShinyHaplot("<PATH>/Shiny")
+```
+$$\\[0.15in]$$
+
+**Call microhaplotypes of rockfish (Sebastes spp.) samples.**
+
+Generate a dataframe with all of the SAM file names and format.
+```{r}
+##Generate dataframe with all sam files in the directory##
+samp_names<-as.data.frame(list.files("<PATH>/Shiny/microhaplot/extdata/SAM"))
+
+##Update column name to "sam_file", making it easier to call##
+colnames(samp_names)<-"sam_file"
+
+##create ID column and remove last 8 characters (i.e., .aln.sam) from file name ##
+samp_names %<>%
+  mutate(ID = substr(sam_file, 1, nchar(sam_file)-8)) %>%
+  mutate(group_label = "sebastes_spp")
+```
+
+Write labels as a text file.
+```{r}
+##write labels as a text file##
+write.table(samp_names, quote = FALSE, col.names = FALSE, row.names = FALSE, sep = "\t", file = "<PATH>/Shiny/microhaplot/extdata/sebastes_microhap_labels.txt")
+```
+
+Generate microhaplotypes. The following code chunk will generate .rmds files containing genotypes for each sample.
+```{r}
+app.path <- "<PATH>/Shiny/microhaplot"                                                           ##path to microhaplot shiny app
+run.label <- "sebastes"                                                                                   ##make a run label  
+sam.path <- "<PATH>/Shiny/microhaplot/extdata/SAM"                                              ##path to SAM alignment files
+label.path <- "<PATH>/Shiny/microhaplot/extdata/sebastes_microhap_labels.txt"                   ##path to text file of SAM file names
+vcf.path <- "<PATH>/Shiny/microhaplot/extdata/sebastes_sppID_combined_filtered.recode.vcf"       ##path to vcf file containing reference microhaplotypes
+
+##Generate haplo.read.tbl
+haplo.read.tbl <- prepHaplotFiles(run.label = run.label,
+                                  sam.path = sam.path,
+                                  label.path = label.path,
+                                  out.path = tempdir(),
+                                  vcf.path = vcf.path,
+                                  app.path = app.path,
+)
+
+##Generate microhaplotypes and .rmds files
+runShinyHaplot("<PATH>/Shiny/microhaplot")
+```
+$$\\[0.15in]$$
+**Assign samples to species with the R package rubias.** 
+
+Filter genotypes based on allel depth, allelic balance, and genotyping call rates.
+
+Note, the following code chunk was written by Diana Baetscher and implements minimum allele depth, allelic balance, and genotyping call rate filters that she designated.
+```{r}
+path<-"<PATH>/Shiny/microhaplot/sebastes.rds"
+
+call_genos_from_haplotRDS <- function(path, min_depth1 = 10, min_depth2 = 6, min_balance = 0.4) {
+  
+  rds <- readRDS(path) %>%
+    tbl_df() %>%
+    select(-sum.Phred.C, -max.Phred.C, -group) %>%
+    filter(rank <= 2) %>%
+    arrange(id, locus, rank) %>%
+    filter(allele.balance >= min_balance)      # filter on allele balance.
+  
+  # now, some stuff to toss all individual x locus combos that
+  # have a rank2 or a rank1 read depth of less than 10.  So, I don't want to
+  # call it if has 10 reads of one allele and 3 of another.  Better to just leave
+  # it uncalled, I think
+  rds2 <- rds %>%
+    group_by(id, locus) %>%
+    filter((n()==2 && depth[2] < min_depth2) + (n() == 1 && depth[1] < min_depth1) == 0) %>%
+    ungroup()
+  
+  # now we want to fill that out so everyone has a rank2 row, but it is explicitly NA for our homozygotes.
+  # I should be able to do this with tidyr::complete, but that is always baffling to me.
+  rds3 <- expand.grid(id = unique(rds$id), locus = unique(rds$locus), rank = 1:2, stringsAsFactors = FALSE) %>%
+    tbl_df() %>%
+    arrange(id, locus, rank) %>%
+    left_join(., rds2)
+  
+  # and now we assign gene_copy1 and gene_copy2
+  rds4 <- rds3 %>%
+    group_by(id, locus) %>%
+    mutate(allele = ifelse(is.na(haplo), haplo[1], haplo),
+           depth = ifelse(is.na(depth), depth[1], depth)) %>%
+    rename(gene_copy = rank) %>%
+    select(id, locus, gene_copy, allele, depth, allele.balance) %>%
+    ungroup()
+  
+  rds4
+}
+
+##path to microhaplot directory##
+dir <- "<PATH>/Shiny/microhaplot"
+
+##call genotypes##
+genos_long <- call_genos_from_haplotRDS(path = file.path(dir, "sebastes.rds"))
+
+genos_long_explicit_NAs <- genos_long %>%
+  select(id) %>%
+  unique() %>%
+  unlist() %>%
+  unname() %>%
+  expand.grid(id = ., locus = unique(genos_long$locus), gene_copy = 1:2, stringsAsFactors = FALSE) %>%
+  tbl_df() %>% 
+  left_join(., genos_long) %>%
+  arrange(id, locus, gene_copy)
+
+genos_long_explicit_NAs %>%
+  group_by(id) %>%
+  tally()
+
+ind_to_toss <- genos_long_explicit_NAs %>%
+  group_by(id) %>%
+  filter(is.na(allele)) %>% # missing data
+  tally() %>%
+  arrange(desc(n)) %>% # remove samples with >20% missing data
+  filter(n > 36) 
+
+genos_ind_filtered <- genos_long_explicit_NAs %>%
+  anti_join(., ind_to_toss)
+```
+
+Load the baseline reference microhaplotypes for each species.
+```{r}
+baseline <- readRDS("<PATH>/sebastes_spp_id_baseline_haplotypes.rds")
+
+#remove 6 markers in the baseline that were removed from the panel and not genotyped in the samples##
+
+markers_in_baseline_not_in_genos<-which(! baseline$locus %in% genos_ind_filtered$locus)
+
+baseline90<-baseline[-markers_in_baseline_not_in_genos, ]
+```
+
+Format for species identification with rubias. 
+
+Note, the following code chunk was written by Diana Baetscher and formats according to her suggestions.
+```{r}
+baseline90 %>%
+  select(collection) %>%
+  unique() %>%
+  arrange()
+
+tossers <- baseline90 %>%
+  select(indiv, gtseq_run, id) %>%
+  unique() %>%
+  group_by(indiv) %>%
+  tally() %>%
+  filter(n >1)
+
+baseline90_one_each <- baseline90 %>%
+  anti_join(., tossers)
+
+baseline_spp_info <- baseline90_one_each %>%
+  select(sample_type, repunit, collection, indiv, gtseq_run, id, species) %>%
+  unique()
+baseline_spp_info$gtseq_run <- as.character(baseline_spp_info$gtseq_run)
+
+for_alleidx <- baseline90_one_each %>%
+  select(-indiv, -c(1:3, 12:13), -species)
+
+for_alleidx$gtseq_run <- as.character(for_alleidx$gtseq_run)
+
+merged_df <- bind_rows(for_alleidx, genos_ind_filtered)
+
+alle_idxs <- merged_df %>% 
+  dplyr::select(gtseq_run, id, locus, gene_copy, allele) %>%
+  group_by(locus) %>%
+  mutate(alleidx = as.integer(factor(allele, levels = unique(allele)))) %>%
+  ungroup() %>%
+  arrange(gtseq_run, id, locus, alleidx) # rubias can handle NA's, so no need to change them to 0's
+
+two_col <- alle_idxs %>%
+  #group_by(indiv, locus) %>%
+  unite(loc, locus, gene_copy, sep = ".") %>%
+  #ungroup() %>%
+  select(-allele) %>%
+  pivot_wider(names_from = loc, values_from = alleidx) 
+
+reference <- two_col %>%
+  left_join(., baseline_spp_info) %>%
+  filter(!is.na(species)) %>%
+  select(-gtseq_run, -id, -species) %>%
+  select(sample_type, repunit, collection, indiv, everything())
+
+rubias_mix <- two_col %>%
+  anti_join(., baseline_spp_info) %>%
+  select(-gtseq_run) %>%
+  mutate(sample_type = "mixture", collection = "blackspotted_rougheye", repunit = NA) %>%
+  select(sample_type, repunit, collection, everything()) %>%
+  rename(indiv = id)
+```
+
+Run rubias. 
+```{r}
+rubias_output <- infer_mixture(reference = reference, mixture = rubias_mix, gen_start_col = 5)
+```
+
+Format results. 
+```{r}
+rubias_output$mixing_proportions %>%
+  ggplot(aes(x = collection, y = pi)) +
+  geom_bar(stat = "identity") +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 0.95)
+  )
+
+top_assign <- rubias_output$indiv_posteriors %>%
+  group_by(indiv) %>%
+  slice_max(., order_by = PofZ)
+
+top_assign 
+
+top_assign %>%
+  filter(z_score < -3 | z_score > 3)
+
+top_assign %>%
+  group_by(collection) %>%
+  tally()
+```
+
+Write assignment results to csv. 
+```{r}
+write.csv(top_assign, file = "<PATH>/Sebastes microhap rubias results.csv")
+```
+
+
